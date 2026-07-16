@@ -144,12 +144,12 @@ def main():
     
     if rank == 0:
         
-        np.random.seed(123+rank)
+        np.random.seed(123)
         # Genera un vettore di lunghezza 'total_samples' pieno di numeri casuali tra 0 e 1.
         # .astype(np.float64) forza il tipo a doppia precisione (8 byte).
         global_signal = np.random.rand(total_samples).astype(np.float64)
         
-        # Decide di iniettare 50 false Pulsar.
+        # Iniettiamo 50 spikes.
         num_fake_spikes = 50
         # Genera 50 indici (posizioni nell'array) casuali compresi tra 0 e total_samples.
         spikes_indices = np.random.randint(0, total_samples, num_fake_spikes)
@@ -172,12 +172,12 @@ def main():
     global_peaks = comm.reduce(local_peaks, op=MPI.SUM, root=0)
     global_max = comm.reduce(local_max, op=MPI.MAX, root=0)
 
-    local_stats = np.array([rank, local_peaks], dtype=np.float64)
+    local_stats = np.array([rank, local_peaks, local_n], dtype=np.float64)
     
     global_stats = None
     if rank == 0:
-        # Dimensione = (numero di processi * 2 elementi per processo)
-        global_stats = np.empty(size * 2, dtype=np.float64)
+        # Dimensione = (numero di processi * 3 elementi per processo)
+        global_stats = np.empty(size * 3, dtype=np.float64)
         
     comm.Gather(local_stats, global_stats, root=0)
 
@@ -185,8 +185,8 @@ def main():
         end_time_global = MPI.Wtime()
         total_simulation_time = end_time_global - start_time_global
 
-        # Riformattiamo l'array 1D in una matrice (Numero_Processi x 2 colonne)
-        stats_matrix = global_stats.reshape((size, 2))
+        # Riformattiamo l'array 1D in una matrice (Numero_Processi x 3 colonne)
+        stats_matrix = global_stats.reshape((size, 3))
         
         print("\n--- RISULTATI ANALISI SEGNALE ---")
         print(f"Campioni analizzati      : {total_samples}")
@@ -196,13 +196,14 @@ def main():
         print(f"TEMPO TOTALE SIMULAZIONE : {total_simulation_time:.4f} sec")
         
         print("\n--- REPORT ANOMALIE PER CORE ---")
-        print("Rank\tAnomalie Trovate")
+        print("Rank\tAnomalies\tSample Size")
         print("-" * 30)
         
         for i in range(size):
             r = int(stats_matrix[i, 0])
             p = int(stats_matrix[i, 1])
-            print(f"{r}\t{p}")
+            c = int(stats_matrix[i, 2])
+            print(f"{r}\t{p}\t\t{c}")
 
 if __name__ == "__main__":
     main()
