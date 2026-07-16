@@ -1,159 +1,221 @@
-"""
-Caso di Studio HPC: Simulazione del Ciclo di Vita di Pompe Industriali.
-Librerie: mpi4py (MPI wrap per Python) e NumPy (vettorizzazione buffer).
-"""
-
 import os
 import numpy as np
 from mpi4py import MPI
 
-FILE_CONFIG = "config.txt"
-FILE_OUTPUT = "pumps_results.npy"
 
-def load_or_create_config(filename):
+CONFIG_FILE = "config.txt"
+
+
+def read_config(filename):
     """
-    Gestione I/O centralizzata. Letta solo dal processo Root per evitare 
-    concorrenza sul file system e colli di bottiglia hardware.
+    Funzione per leggere i parametri da file. 
+    Questa funzione verrà eseguita solo dal rank 0
     """
+    
+    # Crea un dizionario Python con i valori di base (default). 
+    # Se il file non esiste, il programma userà questi.
     defaults = {
-        "num_pumps": 1000000,
-        "total_cycles": 1000,
-        "total_life": 10000.0,
-        "base_v_rms": 1.6  # Vibrazione di base
+        "total_samples": 1000000,  # Numero totale di punti del segnale
+        "window_size": 1000,       # Quanti punti passati guardare per calcolare la media locale
+        "threshold": 5.0           # Se il segnale è tot volte la media, è un'anomalia
     }
     
+    # Controlla se il file specificato dal percorso 'filename' (config.txt) NON esiste sul disco.
     if not os.path.exists(filename):
-        print(f"File di configurazione '{filename}' non trovato. Generazione default...")
+        # Apre (o crea) il file in modalità scrittura ("w" = write). 'f' è il puntatore al file.
         with open(filename, "w") as f:
-            for key, value in defaults.items():
-                f.write(f"{key}={value}\n")
+            # Itera su tutte le coppie chiave-valore del dizionario 'defaults'
+            for key, val in defaults.items():
+                # Scrive fisicamente nel file la stringa "chiave=valore" e va a capo ("\n")
+                f.write(f"{key}={val}\n")
+        # Restituisce il dizionario di default al programma principale ed esce dalla funzione.
         return defaults
     
+    # Se il file invece esiste, prepariamo un dizionario vuoto per ospitare i parametri letti.
     config = {}
+    
+    # Apre il file in modalità lettura ("r" = read).
     with open(filename, "r") as f:
         for line in f:
             line = line.strip()
+            
             if "=" in line and not line.startswith("#"):
+                # .split("=") divide la stringa in due pezzi. 
+                # Es: "total_samples=1000" diventa key="total_samples" e val="1000"
                 key, val = line.split("=")
+                
                 if "." in val:
                     config[key.strip()] = float(val.strip())
                 else:
                     config[key.strip()] = int(val.strip())
+                    
     return config
 
-def calculate_partitions(total_elements, size):
+
+def get_partitions(total_len, size):
     """
-    Calcola il Load Balancing per domini non perfettamente divisibili.
-    Restituisce i vettori di Count e Displacement necessari per Scatterv e Gatherv.
+    Calcola quanti elementi spettano a ogni processo e da quale indice di memoria iniziano.
     """
-    counts = np.full(size, total_elements // size, dtype=int)
-    # Distribuisce il resto equamente tra i primi processi
-    counts[:total_elements % size] += 1
     
-    # Calcola l'offset di memoria per ogni blocco (Displacements)
+    # np.full crea un array lungo 'size' (numero di processi).
+    # Lo riempie con il risultato della divisione intera (//) tra elementi e processi.
+    # Es: 10 // 3 = 3. L'array 'counts' sarà [3, 3, 3].
+    counts = np.full(size, total_len // size, dtype=int)
+    
+    # Il modulo (%) trova il resto della divisione. Es: 10 % 3 = 1.
+    # Questo slicing ([:resto]) seleziona i primi 'resto' processi e aggiunge 1 al loro carico.
+    # Es: L'array diventa [4, 3, 3]. Ora la somma totale fa 10, e nessuno è sovraccarico!
+    counts[:total_len % size] += 1
+    
+    # np.cumsum fa la somma cumulativa. Da [4, 3, 3] genera [4, 7, 10].
+    # np.insert aggiunge uno '0' all'inizio: [0, 4, 7, 10].
+    # [:-1] rimuove l'ultimo elemento. Risultato finale: [0, 4, 7].
+    # Questi sono i displacements: il Rank 0 legge dall'indice 0, 
+    # il Rank 1 dall'indice 4, il Rank 2 dall'indice 7.
     displacements = np.insert(np.cumsum(counts), 0, 0)[:-1]
+    
+    # Restituisce le due tuple necessarie alle funzioni Scatterv e Gatherv.
     return counts, displacements
 
-def local_simulation(local_health, local_cycles, rank, local_n, config):
+
+def process_signal(local_signal, window_size, threshold):
     """
-    Motore Fisico. Viene eseguito in isolamento da ogni MPI rank.
+    Analizza una parte di segnale = window size e cerca anomalie.
+    Viene eseguito da ogni processo.
     """
 
-    np.random.seed(42 + rank)
+    local_peaks = 0
+    local_max = 0.0
     
-    total_cycles = int(config["total_cycles"])
-    total_life = config["total_life"]
-    base_v_rms = config["base_v_rms"]
-    
-    local_temp = np.zeros(local_n, dtype=np.float64)
+    # Controlla se la fetta di dati ricevuta è più piccola della finestra di analisi.
+    if len(local_signal) <= window_size:
+        # Se l'array ha elementi, restituisce 0 picchi e il valore massimo dell'array. 
+        # Altrimenti restituisce 0 e 0.0.
+        return 0, np.max(local_signal) if len(local_signal) > 0 else 0.0
 
-    # Ciclo temporale (Time-stepping)
-    for _ in range(total_cycles):
-        local_cycles += 1.0
+    # Inizia un ciclo FOR. Parte non da 0, ma dall'indice 'window_size' 
+    # perché prima di quel punto non abbiamo abbastanza dati storici per fare una media completa.
+    for i in range(window_size, len(local_signal)):
         
-        # 1. Calcolo usura (Curva simil-Weibull vettorizzata su NumPy)
-        life_consumed = np.clip(local_cycles / total_life, 0.0, 1.0)
-        local_health = np.maximum(0.0, 100.0 * (1.0 - np.power(life_consumed, 2.5)))
+        # Se il valore del segnale nell'istante 'i' è maggiore del massimo storico registrato finora...
+        if local_signal[i] > local_max:
+            # aggiorna il massimo storico con questo nuovo valore.
+            local_max = local_signal[i]
+            
+        # Crea una finestra dell'array che va dall'indice (i - window_size) fino a 'i' escluso.
+        window = local_signal[i - window_size : i]
         
-        # 2. Propagazione fisica (Dall'usura alla vibrazione, al calore)
-        wear_f = (100.0 - local_health) / 100.0
-        wear_vib = np.power(wear_f, 2.0) * 10.0
-        v_rms = base_v_rms + wear_vib
+        # np.mean calcola la media aritmetica di questa finestra.
+        local_mean = np.mean(window)
         
-        local_temp = 38.0 + (wear_f * 40.0) + (v_rms * 0.3)
-        
-        # 3. Chaos Engine (Eventi stocastici di picco termico: 3% probabilità)
-        chaos_mask = np.random.random(local_n) < 0.03
-        local_temp[chaos_mask] += 15.0
+        if local_signal[i] > (local_mean * threshold):
+            local_peaks += 1
 
-    return local_temp
+    # Ritorna i due risultati: un numero intero (i picchi) e un decimale (il valore massimo).
+    return local_peaks, local_max
+
 
 def main():
-    # --- 1. INIZIALIZZAZIONE MPI ---
+
     comm = MPI.COMM_WORLD
     rank = comm.Get_rank()
     size = comm.Get_size()
 
+
+    # Deve esistere per tutti i processi prima di chiamare bcast, altrimenti Python dà errore "variabile non definita".
     config = None
-    global_health = None
-    global_cycles = None
-    global_temp_results = None
-
-    # --- 2. GESTIONE CONFIGURAZIONE (Solo Rank 0) ---
+ 
     if rank == 0:
-        print(f"--- Avvio Simulazione con {size} Processi MPI ---")
-        config = load_or_create_config(FILE_CONFIG)
-        print(f"Parametri di lancio: {config}")
-
-    # --- 3. BROADCAST (bcast - minuscolo per oggetti Python) ---
+        config = read_config(CONFIG_FILE)
+    
     config = comm.bcast(config, root=0)
     
-    num_pumps = int(config["num_pumps"])
+    # Tutti i processi estraggono i valori dal dizionario.
+    total_samples = int(config["total_samples"])
+    window_size = int(config["window_size"])
+    threshold = float(config["threshold"])
 
-    # Setup del partizionamento di memoria
-    counts, displacements = calculate_partitions(num_pumps, size)
+    # Tutti i processi chiamano la funzione per sapere esattamente come verrà diviso il mega-array.
+    counts, displacements = get_partitions(total_samples, size)
+    # 'local_n' è il numero di elementi che spetta al processo.
     local_n = counts[rank]
 
-    # --- 4. ALLOCAZIONE ARRAY (Solo Rank 0 e buffer locali) ---
+    global_signal = None
+    
     if rank == 0:
-        # Il master genera l'array globale delle pompe perfette
-        global_health = np.full(num_pumps, 100.0, dtype=np.float64)
-        global_cycles = np.zeros(num_pumps, dtype=np.float64)
-        global_temp_results = np.empty(num_pumps, dtype=np.float64)
+        
+        np.random.seed(123+rank)
+        # Genera un vettore di lunghezza 'total_samples' pieno di numeri casuali tra 0 e 1.
+        # .astype(np.float64) forza il tipo a doppia precisione (8 byte).
+        global_signal = np.random.rand(total_samples).astype(np.float64)
+        
+        # Decide di iniettare 50 false Pulsar.
+        num_fake_spikes = 50
+        # Genera 50 indici (posizioni nell'array) casuali compresi tra 0 e total_samples.
+        spikes_indices = np.random.randint(0, total_samples, num_fake_spikes)
+        # Va a quelle 50 posizioni esatte nell'array e somma 15.0 al loro valore attuale, creando picchi abnormi.
+        global_signal[spikes_indices] += 15.0
 
-    # Tutti i processi allocano solo lo spazio strettamente necessario
-    local_health = np.empty(local_n, dtype=np.float64)
-    local_cycles = np.empty(local_n, dtype=np.float64)
 
-    # Inizio misurazione performance
+    local_signal = np.empty(local_n, dtype=np.float64)
+
+
+    comm.Barrier()
     start_time = MPI.Wtime()
 
-    # --- 5. DISTRIBUZIONE DATI (Scatterv - MAIUSCOLO per buffer memory C-like) ---
-    # Usando i metodi uppercase evitiamo l'overhead di serializzazione Pickle
-    comm.Scatterv([global_health, counts, displacements, MPI.DOUBLE], local_health, root=0)
-    comm.Scatterv([global_cycles, counts, displacements, MPI.DOUBLE], local_cycles, root=0)
+    comm.Scatterv([global_signal, counts, displacements, MPI.DOUBLE], local_signal, root=0)
 
-    # --- 6. FASE DI CALCOLO PARALLELO ---
-    local_results = local_simulation(local_health, local_cycles, rank, local_n, config)
+    local_peaks, local_max = process_signal(local_signal, window_size, threshold)
 
-    # --- 7. RACCOLTA DATI (Gatherv - MAIUSCOLO) ---
-    # Riportiamo il dominio decomposto all'interno dell'array globale sul Master
-    comm.Gatherv(local_results, [global_temp_results, counts, displacements, MPI.DOUBLE], root=0)
 
-    # Barriera di Sincronizzazione: assicuriamoci che tutti abbiano finito prima di fermare il tempo
-    comm.Barrier() 
+    global_peaks = comm.reduce(local_peaks, op=MPI.SUM, root=0)
+
+    global_max = comm.reduce(local_max, op=MPI.MAX, root=0)
+
     end_time = MPI.Wtime()
+    local_duration = end_time - start_time
 
-    # --- 8. POST-PROCESSING & OUTPUT (Solo Rank 0) ---
+    # Ogni processo crea un micro-array NumPy di 3 elementi contenente i propri dati.
+    # Viene forzato a float64 perché gli array NumPy devono avere un solo tipo di dato, e il tempo è decimale.
+    local_stats = np.array([rank, local_duration, local_peaks], dtype=np.float64)
+    
+    global_stats = None
     if rank == 0:
-        np.save(FILE_OUTPUT, global_temp_results)
-        mean_temp = np.mean(global_temp_results)
+        # Dimensione = (numero di processi * 3 elementi per processo).
+        global_stats = np.empty(size * 3, dtype=np.float64)
         
-        print("\n--- RISULTATI SIMULAZIONE ---")
-        print(f"Totale pompe simulate         : {num_pumps}")
-        print(f"Temperatura Media Globale     : {mean_temp:.2f} °C")
-        print(f"Tempo di Esecuzione MPI       : {end_time - start_time:.4f} secondi")
-        print(f"Risultati salvati su disco    : {FILE_OUTPUT}")
+    # Gather (MAIUSCOLA perché lavora su array NumPy).
+    # Tutti i processi inviano il loro mini-array 'local_stats'. Il Rank 0 li impila ordinatamente dentro 'global_stats'.
+    # A differenza di Gatherv (con la V), qui non servono counts e displacements perché il pacchetto (3 elementi) è uguale per tutti.
+    comm.Gather(local_stats, global_stats, root=0)
+
+    if rank == 0:
+        # 'global_stats' è un array 1D lungo (es. 12 elementi per 4 processi). 
+        # .reshape((size, 3)) lo piega trasformandolo in una matrice 2D (4 righe e 3 colonne).
+        stats_matrix = global_stats.reshape((size, 3))
+        
+        # Stampa i risultati globali aggregati dalle funzioni 'reduce'.
+        print("\n--- ANALISI SEGNALE COMPLETATA ---")
+        print(f"Campioni analizzati: {total_samples}")
+        print(f"Window size: {window_size}")
+        print(f"Picchi totali: {global_peaks}")
+        print(f"Picco max assoluto: {global_max:.2f}")
+        
+        print("\n--- REPORT PRESTAZIONALE PER CORE ---")
+        print("Rank\tTempo (sec)\tAnomalie Trovate")
+        print("-" * 45)
+        
+        # Itera su ogni "riga" (cioè ogni processo) della matrice appena ricostruita.
+        for i in range(size):
+            # Estrae la colonna 0 (il Rank) e lo forza a Integer per togliere il punto decimale.
+            r = int(stats_matrix[i, 0])
+            # Estrae la colonna 1 (il Tempo). Rimane float.
+            t = stats_matrix[i, 1]
+            # Estrae la colonna 2 (i Picchi) e lo forza a Integer.
+            p = int(stats_matrix[i, 2])
+            
+            # \t inserisce una tabulazione (spazio largo) per allineare le colonne a schermo.
+            print(f"{r}\t{t:.4f}\t\t{p}")
 
 if __name__ == "__main__":
     main()
