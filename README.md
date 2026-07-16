@@ -36,3 +36,36 @@ threshold=5.0
 * **threshold:** How many times a signal must be bigger than the average to be counted as a spike.
 
 A final scaling analysis is performed to evaluate the performance of the parallelization. Increasing the window size, the amount of computational effort required by each core increases. This is very useful to analyze strong scaling behaviour. On the other hand, increasing total samples and number of cores (eg. doubling both) is very useful to analyze the weak scaling behaviour. The results of this analysis are availiable in the dedicated folder.
+
+---
+
+### Program Flow Diagram
+
+```mermaid
+graph TD
+    %% Initial Flow
+    A([Rank 0: Read Config & Build Signal]) -->|MPI_Bcast| B([All Cores: Get Parameters])
+    B -->|MPI_Scatterv| C{Split Signal}
+    
+    %% Parallel Computing Block
+    subgraph "Parallel Work (Independent)"
+        C -->|Chunk 1| W0[Core 0: Find Spikes]
+        C -->|Chunk 2| W1[Core 1: Find Spikes]
+        C -->|Chunk N| WN[Core N: Find Spikes]
+    end
+    
+    %% Return Flow
+    W0 -->|MPI_Reduce & MPI_Gather| D{Collect Data}
+    W1 -->|MPI_Reduce & MPI_Gather| D
+    WN -->|MPI_Reduce & MPI_Gather| D
+    
+    %% Conclusion
+    D --> E([Rank 0: Stop Timer & Print Report])
+    
+    %% Styles
+    classDef master fill:#ffcccc,stroke:#cc0000,stroke-width:2px;
+    classDef worker fill:#ccccff,stroke:#0000cc,stroke-width:2px;
+    class A,E master;
+    class W0,W1,WN worker;
+
+```
