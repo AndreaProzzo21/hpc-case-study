@@ -161,61 +161,48 @@ def main():
 
 
     comm.Barrier()
-    start_time = MPI.Wtime()
+    start_time_global = 0.0
+    if rank == 0:
+        start_time_global = MPI.Wtime()
 
     comm.Scatterv([global_signal, counts, displacements, MPI.DOUBLE], local_signal, root=0)
 
     local_peaks, local_max = process_signal(local_signal, window_size, threshold)
 
-
     global_peaks = comm.reduce(local_peaks, op=MPI.SUM, root=0)
-
     global_max = comm.reduce(local_max, op=MPI.MAX, root=0)
 
-    end_time = MPI.Wtime()
-    local_duration = end_time - start_time
-
-    # Ogni processo crea un micro-array NumPy di 3 elementi contenente i propri dati.
-    # Viene forzato a float64 perché gli array NumPy devono avere un solo tipo di dato, e il tempo è decimale.
-    local_stats = np.array([rank, local_duration, local_peaks], dtype=np.float64)
+    local_stats = np.array([rank, local_peaks], dtype=np.float64)
     
     global_stats = None
     if rank == 0:
-        # Dimensione = (numero di processi * 3 elementi per processo).
-        global_stats = np.empty(size * 3, dtype=np.float64)
+        # Dimensione = (numero di processi * 2 elementi per processo)
+        global_stats = np.empty(size * 2, dtype=np.float64)
         
-    # Gather (MAIUSCOLA perché lavora su array NumPy).
-    # Tutti i processi inviano il loro mini-array 'local_stats'. Il Rank 0 li impila ordinatamente dentro 'global_stats'.
-    # A differenza di Gatherv (con la V), qui non servono counts e displacements perché il pacchetto (3 elementi) è uguale per tutti.
     comm.Gather(local_stats, global_stats, root=0)
 
     if rank == 0:
-        # 'global_stats' è un array 1D lungo (es. 12 elementi per 4 processi). 
-        # .reshape((size, 3)) lo piega trasformandolo in una matrice 2D (4 righe e 3 colonne).
-        stats_matrix = global_stats.reshape((size, 3))
+        end_time_global = MPI.Wtime()
+        total_simulation_time = end_time_global - start_time_global
+
+        # Riformattiamo l'array 1D in una matrice (Numero_Processi x 2 colonne)
+        stats_matrix = global_stats.reshape((size, 2))
         
-        # Stampa i risultati globali aggregati dalle funzioni 'reduce'.
-        print("\n--- ANALISI SEGNALE COMPLETATA ---")
-        print(f"Campioni analizzati: {total_samples}")
-        print(f"Window size: {window_size}")
-        print(f"Picchi totali: {global_peaks}")
-        print(f"Picco max assoluto: {global_max:.2f}")
+        print("\n--- RISULTATI ANALISI SEGNALE ---")
+        print(f"Campioni analizzati      : {total_samples}")
+        print(f"Window size              : {window_size}")
+        print(f"Picchi totali trovati    : {global_peaks}")
+        print(f"Picco max assoluto       : {global_max:.2f}")
+        print(f"TEMPO TOTALE SIMULAZIONE : {total_simulation_time:.4f} sec")
         
-        print("\n--- REPORT PRESTAZIONALE PER CORE ---")
-        print("Rank\tTempo (sec)\tAnomalie Trovate")
-        print("-" * 45)
+        print("\n--- REPORT ANOMALIE PER CORE ---")
+        print("Rank\tAnomalie Trovate")
+        print("-" * 30)
         
-        # Itera su ogni "riga" (cioè ogni processo) della matrice appena ricostruita.
         for i in range(size):
-            # Estrae la colonna 0 (il Rank) e lo forza a Integer per togliere il punto decimale.
             r = int(stats_matrix[i, 0])
-            # Estrae la colonna 1 (il Tempo). Rimane float.
-            t = stats_matrix[i, 1]
-            # Estrae la colonna 2 (i Picchi) e lo forza a Integer.
-            p = int(stats_matrix[i, 2])
-            
-            # \t inserisce una tabulazione (spazio largo) per allineare le colonne a schermo.
-            print(f"{r}\t{t:.4f}\t\t{p}")
+            p = int(stats_matrix[i, 1])
+            print(f"{r}\t{p}")
 
 if __name__ == "__main__":
     main()

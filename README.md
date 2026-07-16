@@ -13,10 +13,9 @@ Rank 0 creates a huge array of random noise (the signal) and injects a few fake 
 3. **The Calculation (Parallel Work)**:
 Every core works alone on its piece of the signal. It looks at a "sliding window" of data points to calculate the local average. If a point is much higher than the average, the core counts it as a spike.
 4. **Global Results (`reduce`)**:
-We don't send the millions of data points back over the network. Instead, we just ask each core: *"How many spikes did you find? What was your highest peak?"*. 
 Each core send the number of spikes it found in its chunk and what the highest peak was. `MPI_SUM` and `MPI_MAX` are used to get the final totals instantly.
-5. **Performance Report (`Gather`)**:
-Every core sends its execution time to Rank 0. Rank 0 prints a final table showing how fast each core worked.
+5. **Final Report (`Gather`)**:
+Rank 0 tracks the overall simulation time using a global timer. Then, every core sends its ID (Rank) and its local spike count to Rank 0 using a `Gather` operation. Finally, Rank 0 prints the total execution time and a table showing how many spikes each core found.
 
 ---
 
@@ -28,13 +27,12 @@ The program needs a `config.txt` file in the same folder. If you don't make one,
 total_samples=1000000
 window_size=1000
 threshold=5.0
-
 ```
 
-* `total_samples`: How long the signal is.
-* `window_size`: How many points to use for the moving average.
-* `threshold`: How many times a signal must be bigger than the average to be counted as a spike.
+* **total_samples:** How long the signal is.
+
+* **window_size:** How many points to use for the moving average.
+
+* **threshold:** How many times a signal must be bigger than the average to be counted as a spike.
 
 A final scaling analysis is performed to evaluate the performance of the parallelization. Increasing the window size, the amount of computational effort required by each core increases. This is very useful to analyze strong scaling behaviour. On the other hand, increasing total samples and number of cores (eg. doubling both) is very useful to analyze the weak scaling behaviour. The results of this analysis are availiable in the dedicated folder.
----
-
