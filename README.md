@@ -42,7 +42,7 @@ A final scaling analysis is performed to evaluate the performance of the paralle
 ### Program Flow Diagram
 
 ```mermaid
-graph TD
+graph LR
     %% Initial Flow
     A([Rank 0: Read Config & Build Signal]) -->|MPI_Bcast| B([All Cores: Get Parameters])
     B -->|MPI_Scatterv| C{Split Signal}
